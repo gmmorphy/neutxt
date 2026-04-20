@@ -2,55 +2,70 @@
 
 **Text-based Neural Media Encoding and Reconstruction System**
 
-NEUTXT represents video (and soon audio) as self-describing UTF-8 text using neural codecs.
-The resulting text can be pasted into LLM context windows, stored in git repos, or transmitted
-through any text-based system — then decoded back into valid media.
+NEUTXT represents video **and audio** as self-describing UTF-8 text using neural codecs
+(MAGVIT2 for video, EnCodec for audio). The resulting text can be pasted into LLM
+context windows, stored in git repos, or transmitted through any text-based system —
+then decoded back into valid media.
 
 ## Why
 
 Modern neural codecs (MAGVIT2, EnCodec) compress media into compact latent tokens. NEUTXT
 serializes those tokens as structured text, enabling:
 
-- **Send video to an LLM as part of a prompt** — have Claude/GPT manipulate it
+- **Send video or audio to an LLM as part of a prompt** — have Claude/GPT manipulate it
 - **Version-control media alongside code** — diffable, mergeable
 - **Embed media in text-only systems** — chat, blockchain, databases
+- **Synchronized A/V in one text stream** — `K:`/`D:` video lines interleaved with `A:` audio lines
 
 ## Quick Demo
 
 ```bash
-# Encode video → NEUTXT text → decode to GIF
-python -m neutxt demo input.mp4 \
+# Video + audio (default): encode → text → decode to GIF + WAV
+python -m neutxt demo input.mp4 --mode av \
   --vq_ckpt models/magvit2_256L.ckpt \
   --vq_config configs/imagenet_lfqgan_256_L.yaml
 
-# Send through Claude API, have it reverse the video
-python -m neutxt llm input.mp4 \
+# Audio only (no MAGVIT2 needed)
+python -m neutxt demo input.mp3 --mode a
+
+# Send through Claude API, have it strip the audio track
+python -m neutxt llm input.mp4 --mode av \
   --vq_ckpt models/magvit2_256L.ckpt \
   --vq_config configs/imagenet_lfqgan_256_L.yaml \
-  --task reverse
+  --task strip_audio
 ```
 
 ## Size
 
-- 3 seconds of 256×256 video @ 8fps → ~7,700 characters (~1,900 LLM tokens)
+- 2 seconds of 256×256 video + audio @ 8fps, 6 kbps → ~7,200 characters (~1,800 LLM tokens)
+- 2 seconds of audio alone @ 6 kbps → ~2,000 characters (~500 LLM tokens)
 - Fits comfortably in Claude 200K, GPT-4o 128K, Gemini 1M context windows
 
 ## Format
 
 ```
 --- NEUTXT v2 ---
-model: MAGVIT2_256_L
+mode: av
+video_model: MAGVIT2_256_L
 fps: 8.0
 resolution: 256x256
-code_bits: 18
+video_code_bits: 18
 tokens_per_frame: 256
 keyint: 8
+video_frames: 16
+audio_model: ENCODEC_24K
+audio_sr: 24000
+audio_bandwidth: 6.0
+audio_quantizers: 8
+audio_code_bits: 10
+audio_chunk_seconds: 1.0
+audio_chunks: 2
 compression: zstd
-frames: 24
 checksum: a1b2c3d4
 ---
-K:<base85 payload>   ← keyframe
-D:<base85 payload>   ← delta (XOR vs previous)
+K:<base85 payload>      ← video keyframe
+D:<base85 payload>      ← video delta (XOR vs previous)
+A:<timesteps>:<base85>  ← audio chunk (independent)
 ...
 ```
 
@@ -85,8 +100,9 @@ export ANTHROPIC_API_KEY=sk-ant-...
 - [x] UTF-8 text format with keyframes + XOR deltas
 - [x] Claude API integration (reverse, keyframes, slowmo, describe, freeform)
 - [x] Apple MPS / CUDA auto-detection
-- [ ] Audio encoding via EnCodec *(in progress)*
-- [ ] Synchronized audiovisual mode
+- [x] Audio encoding via EnCodec
+- [x] Synchronized audiovisual mode (`--mode av`)
+- [x] Audio-aware Claude tasks (strip_audio, strip_video, reverse_audio, audio_loop)
 
 ## License
 
