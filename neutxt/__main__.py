@@ -7,6 +7,7 @@ COMMANDS = {
     "play": "neutxt.play",
     "demo": "neutxt.demo",
     "llm": "neutxt.llm_demo",
+    "mcp": "neutxt.mcp_server",
 }
 
 USAGE = """Usage: python -m neutxt <command> [args...]
@@ -14,14 +15,14 @@ USAGE = """Usage: python -m neutxt <command> [args...]
 Commands:
   encode    Encode video/audio to binary .neutxt format
   play      Play a binary .neutxt file
-  demo      Encode video to NEUTXT text format + decode to GIF
-  llm       Send NEUTXT video through Claude API for manipulation
+  demo      Encode video/audio to NEUTXT text format + decode back
+  llm       Send NEUTXT media through Claude API for manipulation
+  mcp       Run the NEUTXT MCP server (stdio) for Claude Code / Claude desktop
 
 Examples:
-  python -m neutxt demo input.mp4 --vq_ckpt ckpt.pt --vq_config cfg.yaml
+  python -m neutxt demo input.mp4 --mode av --vq_ckpt ckpt.pt --vq_config cfg.yaml
   python -m neutxt llm input.mp4 --vq_ckpt ckpt.pt --vq_config cfg.yaml --task reverse
-  python -m neutxt encode input.mp4 --vq_ckpt ckpt.pt --vq_config cfg.yaml
-  python -m neutxt play output.neutxt --vq_ckpt ckpt.pt --vq_config cfg.yaml
+  python -m neutxt mcp    # run as an MCP server (connect from Claude Code)
 """
 
 

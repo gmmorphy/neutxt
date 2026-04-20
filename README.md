@@ -89,10 +89,39 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 | Command | Purpose |
 |---|---|
-| `python -m neutxt demo` | Encode video → text → GIF (local only) |
-| `python -m neutxt llm` | Encode → Claude API → decode back to GIF |
+| `python -m neutxt demo` | Encode video/audio → text → GIF + WAV (local only) |
+| `python -m neutxt llm` | Encode → Claude API → decode back to media |
+| `python -m neutxt mcp` | Run MCP server — gives any Claude Code / Claude desktop native `neutxt_*` tools |
 | `python -m neutxt encode` | Encode to binary `.neutxt` container |
 | `python -m neutxt play` | Play a binary `.neutxt` file |
+
+## Use from Claude Code / Claude desktop (MCP)
+
+Add this to your Claude MCP config (e.g. `~/.claude/mcp_servers.json`):
+
+```json
+{
+  "neutxt": {
+    "command": "/path/to/neutxt/.venv/bin/python",
+    "args": ["-m", "neutxt", "mcp"],
+    "env": {
+      "NEUTXT_VQ_CKPT": "/path/to/magvit2_256L.ckpt",
+      "NEUTXT_VQ_CONFIG": "/path/to/imagenet_lfqgan_256_L.yaml"
+    }
+  }
+}
+```
+
+Then Claude can call these tools natively — no system prompt needed:
+
+| Tool | Does |
+|---|---|
+| `neutxt_info` | Inspect metadata, duration, frame counts |
+| `neutxt_trim` | Cut a time range |
+| `neutxt_reverse` | Reverse playback (requires all keyframes) |
+| `neutxt_strip_audio` / `neutxt_strip_video` | Remove one stream |
+| `neutxt_concat` | Join multiple files |
+| `neutxt_preview` | Decode frames to PNG so Claude can *see* the video |
 
 ## Status
 

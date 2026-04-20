@@ -6,3 +6,5 @@ sounddevice>=0.4
 zstandard>=0.20
 omegaconf>=2.3
 anthropic>=0.40
+encodec>=0.1
+mcp>=1.0
