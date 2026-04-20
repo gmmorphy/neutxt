@@ -1,0 +1,8 @@
+torch>=2.0
+torchvision>=0.15
+numpy>=1.24
+Pillow>=9.0
+sounddevice>=0.4
+zstandard>=0.20
+omegaconf>=2.3
+anthropic>=0.40

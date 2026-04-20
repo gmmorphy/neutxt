@@ -1,0 +1,18 @@
+.venv/
+models/
+__pycache__/
+*.pyc
+*.gif
+*.mp4
+*.neutxt.txt
+*.egg-info/
+.DS_Store
+taming/
+# NEVER commit API keys or credentials
+*.rtf
+*api*key*
+*API*KEY*
+.env
+.env.*
+secrets/
+credentials/
