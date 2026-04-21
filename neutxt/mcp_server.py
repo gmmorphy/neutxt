@@ -109,7 +109,7 @@ def neutxt_info(path: str) -> dict:
     Works without any neural models — pure text inspection.
 
     Args:
-        path: Path to a .neutxt.txt file.
+        path: Path to a .neutxt file.
     """
     text = _read(path)
     stats = text_stats(text)
@@ -152,7 +152,7 @@ def neutxt_reverse(path: str, output_path: str) -> dict:
     guidance. Audio chunks (A:) are always safe to reverse.
 
     Args:
-        path: Input .neutxt.txt path.
+        path: Input .neutxt path.
         output_path: Where to write the reversed file.
     """
     text = _read(path)
@@ -201,7 +201,7 @@ def neutxt_strip_audio(path: str, output_path: str) -> dict:
     """Remove all audio (A:) lines from a NEUTXT file, keeping only video.
 
     Args:
-        path: Input .neutxt.txt path.
+        path: Input .neutxt path.
         output_path: Where to write the video-only file.
     """
     text = _read(path)
@@ -217,7 +217,7 @@ def neutxt_strip_video(path: str, output_path: str) -> dict:
     """Remove all video (K:/D:) lines from a NEUTXT file, keeping only audio.
 
     Args:
-        path: Input .neutxt.txt path.
+        path: Input .neutxt path.
         output_path: Where to write the audio-only file.
     """
     text = _read(path)
@@ -240,7 +240,7 @@ def neutxt_trim(path: str, start_sec: float, end_sec: float,
     Audio: keeps A: chunks whose window overlaps the range.
 
     Args:
-        path: Input .neutxt.txt path.
+        path: Input .neutxt path.
         start_sec: Range start (inclusive).
         end_sec: Range end (exclusive).
         output_path: Where to write the trimmed file.
@@ -294,7 +294,7 @@ def neutxt_concat(paths: list[str], output_path: str) -> dict:
     parameters. Mismatches return an error.
 
     Args:
-        paths: List of input .neutxt.txt paths, in the order to concatenate.
+        paths: List of input .neutxt paths, in the order to concatenate.
         output_path: Where to write the concatenated file.
     """
     if len(paths) < 2:
@@ -335,7 +335,7 @@ def neutxt_preview(path: str, start_sec: float = 0.0, end_sec: float = 2.0,
     vision can read them directly.
 
     Args:
-        path: Input .neutxt.txt path.
+        path: Input .neutxt path.
         start_sec: Start of preview window (default 0).
         end_sec: End of preview window (default 2).
         max_frames: Maximum number of frames to return (default 4, capped at 8).
@@ -546,7 +546,7 @@ def neutxt_apply_pixel_op(path: str, output_path: str, op: str,
     still round-tripped once. Output has all keyframes (keyint=1).
 
     Args:
-        path: Input .neutxt.txt path.
+        path: Input .neutxt path.
         output_path: Where to write the result.
         op: One of grayscale, invert, brighten, darken, sepia.
         start_sec: Start of affected range (default 0).
@@ -584,7 +584,7 @@ def neutxt_swap_hue(path: str, output_path: str,
       red ≈ 0, yellow ≈ 60, green ≈ 120, cyan ≈ 180, blue ≈ 240, magenta ≈ 300.
 
     Args:
-        path: Input .neutxt.txt path.
+        path: Input .neutxt path.
         output_path: Where to write the result.
         from_hue_deg: Center of hue range to replace (0-360).
         to_hue_deg: Target hue (0-360).
@@ -620,7 +620,7 @@ def neutxt_apply_audio_op(path: str, output_path: str, op: str,
     """Apply a DSP transform to the audio over a time range.
 
     Args:
-        path: Input .neutxt.txt path.
+        path: Input .neutxt path.
         output_path: Where to write the result.
         op: One of volume, silence, reverse, fade_in, fade_out.
         start_sec: Start of affected range (default 0).
@@ -668,7 +668,7 @@ def neutxt_replace_audio(path: str, output_path: str, audio_path: str,
     audio_sr, and encoded with EnCodec at the file's existing bandwidth.
 
     Args:
-        path: Input .neutxt.txt path.
+        path: Input .neutxt path.
         output_path: Where to write the result.
         audio_path: Source audio file (any ffmpeg-readable format).
         start_sec: Where to splice in (default 0 = start).
@@ -734,7 +734,7 @@ def neutxt_to_mp4(path: str, output_path: str, open_after: bool = False) -> dict
     """Decode a NEUTXT file to a standard .mp4 (video + audio muxed).
 
     Args:
-        path: Input .neutxt.txt path.
+        path: Input .neutxt path.
         output_path: Where to write the .mp4.
         open_after: If true, launch the system player on the result.
     """

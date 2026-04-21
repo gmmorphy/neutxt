@@ -1,10 +1,10 @@
 """Play .neutxt files.
 
-For NEUTXT text files (.neutxt.txt), decodes to a standard .mp4 with ffmpeg
-and opens it in the system player — simplest and most reliable path.
+Both formats share the .neutxt extension and are distinguished by magic
+bytes: text files start with '--- NEUTXT', binary files do not.
 
-For legacy binary .neutxt files, falls back to the Tkinter + sounddevice
-player below.
+Text files are decoded to a standard .mp4 with ffmpeg and opened in the
+system player. Binary files use the Tkinter + sounddevice player below.
 """
 from __future__ import annotations
 
@@ -25,12 +25,9 @@ import numpy as np
 
 
 def _is_text_neutxt(path: str) -> bool:
-    """Return True if path looks like a NEUTXT v2 text file."""
-    p = Path(path)
-    if p.suffix == ".txt" or p.name.endswith(".neutxt.txt"):
-        return True
+    """Return True if path points to a NEUTXT text-format file."""
     try:
-        with open(p, "rb") as f:
+        with open(path, "rb") as f:
             head = f.read(64)
         return head.startswith(b"--- NEUTXT")
     except OSError:
@@ -48,7 +45,7 @@ def _play_text_neutxt(input_path: str, keep: bool = False):
     from neutxt.mcp_server import _decode_to_mp4
 
     if keep:
-        out = str(Path(input_path).with_suffix("").with_suffix(".mp4"))
+        out = str(Path(input_path).with_suffix(".mp4"))
         result = _decode_to_mp4(input_path, out)
         print(f"Saved: {result['output_path']}")
     else:

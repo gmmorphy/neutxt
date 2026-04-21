@@ -93,7 +93,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 | `python -m neutxt llm` | Encode → Claude API → decode back to media |
 | `python -m neutxt mcp` | Run MCP server — gives any Claude Code / Claude desktop native `neutxt_*` tools |
 | `python -m neutxt encode` | Encode to binary `.neutxt` container |
-| `python -m neutxt play` | Play a binary `.neutxt` file |
+| `python -m neutxt play` | Play a `.neutxt` file (text or binary, auto-detected) |
 
 ## Use from Claude Code / Claude desktop (MCP)
 

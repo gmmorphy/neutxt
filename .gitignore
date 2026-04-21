@@ -4,7 +4,7 @@ __pycache__/
 *.pyc
 *.gif
 *.mp4
-*.neutxt.txt
+*.neutxt
 *.egg-info/
 .DS_Store
 taming/

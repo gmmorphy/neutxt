@@ -213,7 +213,7 @@ def main():
         print()
 
     if args.save_text:
-        text_path = os.path.join(args.out_dir, f"{basename}.neutxt.txt")
+        text_path = os.path.join(args.out_dir, f"{basename}.neutxt")
         with open(text_path, "w", encoding="utf-8") as f:
             f.write(neutxt_text)
         print(f"  Saved: {text_path}")
