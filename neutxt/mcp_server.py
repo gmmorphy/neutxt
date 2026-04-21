@@ -48,8 +48,7 @@ mcp = FastMCP("neutxt")
 # ---------------------------------------------------------------------------
 
 _tok = None
-_enc_24 = None
-_enc_48 = None
+_enc_cache: dict = {}
 
 
 def _get_tokenizer():
@@ -69,20 +68,15 @@ def _get_tokenizer():
     return _tok
 
 
-def _get_encoder(sample_rate: int):
-    global _enc_24, _enc_48
-    if sample_rate == 24000 and _enc_24 is not None:
-        return _enc_24
-    if sample_rate == 48000 and _enc_48 is not None:
-        return _enc_48
+def _get_encoder(sample_rate: int, bandwidth: float):
+    key = (sample_rate, bandwidth)
+    if key in _enc_cache:
+        return _enc_cache[key]
     from neutxt.vq import pick_device
     from neutxt.audio_codec import load_encodec
     device = pick_device("auto")
-    enc = load_encodec(device, sample_rate=sample_rate, bandwidth=6.0)
-    if sample_rate == 24000:
-        _enc_24 = enc
-    else:
-        _enc_48 = enc
+    enc = load_encodec(device, sample_rate=sample_rate, bandwidth=bandwidth)
+    _enc_cache[key] = enc
     return enc
 
 
@@ -427,6 +421,397 @@ def _rewrite_with_new_body(original_text: str, new_body_lines: list[str],
     written = _write(output_path, out_text)
     return {"output_path": written, "mode": new_mode,
             "video_frames": n_video, "audio_chunks": n_audio}
+
+
+# ---------------------------------------------------------------------------
+# Pixel / audio transforms (require neural codecs)
+# ---------------------------------------------------------------------------
+
+_PIXEL_OPS = {"grayscale", "invert", "brighten", "darken", "sepia"}
+_AUDIO_OPS = {"volume", "silence", "reverse", "fade_in", "fade_out"}
+
+
+def _apply_pixel_op(rgb, op: str, strength: float):
+    import numpy as np
+    from PIL import Image as PILImage, ImageEnhance, ImageOps
+    img = PILImage.fromarray(rgb, "RGB")
+    if op == "grayscale":
+        return np.array(img.convert("L").convert("RGB"))
+    if op == "invert":
+        return np.array(ImageOps.invert(img))
+    if op == "brighten":
+        return np.array(ImageEnhance.Brightness(img).enhance(1.0 + max(0.0, strength)))
+    if op == "darken":
+        return np.array(ImageEnhance.Brightness(img).enhance(max(0.0, 1.0 - strength)))
+    if op == "sepia":
+        arr = np.array(img, dtype=np.float32)
+        r, g, b = arr[..., 0], arr[..., 1], arr[..., 2]
+        nr = np.clip(0.393 * r + 0.769 * g + 0.189 * b, 0, 255)
+        ng = np.clip(0.349 * r + 0.686 * g + 0.168 * b, 0, 255)
+        nb = np.clip(0.272 * r + 0.534 * g + 0.131 * b, 0, 255)
+        return np.stack([nr, ng, nb], axis=-1).astype(np.uint8)
+    raise ValueError(f"Unknown pixel op: {op}. Known: {sorted(_PIXEL_OPS)}")
+
+
+def _apply_hue_swap(rgb, from_hue_deg: float, to_hue_deg: float,
+                    tolerance_deg: float, sat_min: int):
+    import numpy as np
+    from PIL import Image as PILImage
+    hsv = np.array(PILImage.fromarray(rgb, "RGB").convert("HSV"), dtype=np.int32)
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+
+    target = int((from_hue_deg % 360) / 360.0 * 255)
+    new_target = int((to_hue_deg % 360) / 360.0 * 255)
+    tol = int(tolerance_deg / 360.0 * 255)
+
+    diff = np.abs(h - target)
+    diff = np.minimum(diff, 255 - diff)  # wrap-around
+    mask = (diff <= tol) & (s >= sat_min)
+
+    shift = new_target - target
+    new_h = np.where(mask, (h + shift) % 255, h).astype(np.uint8)
+    out = np.stack([new_h, s.astype(np.uint8), v.astype(np.uint8)], axis=-1)
+    return np.array(PILImage.fromarray(out, "HSV").convert("RGB"))
+
+
+def _reencode_video_and_audio(text: str, frame_op, audio_op=None) -> str:
+    """Decode-all + re-encode-all pipeline.
+
+    frame_op: callable (rgb, idx) -> rgb (returns unchanged RGB if no-op)
+    audio_op: callable (pcm_full, sr, header) -> pcm_full (optional)
+
+    Re-encodes video as all keyframes (keyint=1) to guarantee validity
+    even when the input contains delta frames.
+    """
+    import numpy as np
+    from neutxt.vq import encode_frame_to_packed_codes, decode_packed_codes_to_frame
+    from neutxt.audio_codec import encode_audio_to_codes, decode_codes_to_audio
+
+    header, video_codes = decode_text_to_frames(text)
+    _, audio_chunks = decode_text_to_audio_codes(text)
+
+    tok = _get_tokenizer() if video_codes else None
+    enc = (_get_encoder(header.audio_sr, header.audio_bandwidth)
+           if audio_chunks else None)
+
+    new_video_codes = []
+    if video_codes:
+        for i, codes in enumerate(video_codes):
+            rgb = decode_packed_codes_to_frame(tok, codes, 16, 16)
+            rgb = frame_op(rgb, i)
+            nc, _, _ = encode_frame_to_packed_codes(tok, rgb)
+            new_video_codes.append(nc)
+
+    new_audio_chunks = []
+    if audio_chunks:
+        if audio_op is not None:
+            # Decode all audio, apply op, re-chunk, re-encode
+            merged = np.concatenate(audio_chunks, axis=1)
+            pcm = decode_codes_to_audio(enc, merged)
+            pcm = audio_op(pcm, header.audio_sr, header)
+            new_codes = encode_audio_to_codes(enc, pcm.astype(np.float32))
+            # Re-chunk
+            chunk_sec = header.audio_chunk_seconds or 1.0
+            total_T = new_codes.shape[1]
+            total_dur = len(pcm) / header.audio_sr
+            fps_codes = total_T / max(total_dur, 1e-6)
+            step = max(1, int(round(fps_codes * chunk_sec)))
+            for s in range(0, total_T, step):
+                new_audio_chunks.append(new_codes[:, s:s + step].copy())
+        else:
+            new_audio_chunks = audio_chunks
+
+    return encode_av_to_text(
+        video_codes=new_video_codes if new_video_codes else None,
+        audio_codes=new_audio_chunks if new_audio_chunks else None,
+        fps=header.fps, keyint=1,
+        video_model=header.video_model,
+        audio_model=header.audio_model,
+        audio_sr=header.audio_sr,
+        audio_bandwidth=header.audio_bandwidth,
+        audio_quantizers=header.audio_quantizers,
+        audio_chunk_seconds=header.audio_chunk_seconds,
+        compression=header.compression or "zstd",
+    )
+
+
+@mcp.tool()
+def neutxt_apply_pixel_op(path: str, output_path: str, op: str,
+                           start_sec: float = 0.0, end_sec: float = -1.0,
+                           strength: float = 0.5) -> dict:
+    """Apply a pixel-space transform to video frames in a time range.
+
+    Decodes affected frames via MAGVIT2, applies the op, and re-encodes.
+    Re-encoding is lossy — frames outside the range pass through but are
+    still round-tripped once. Output has all keyframes (keyint=1).
+
+    Args:
+        path: Input .neutxt.txt path.
+        output_path: Where to write the result.
+        op: One of grayscale, invert, brighten, darken, sepia.
+        start_sec: Start of affected range (default 0).
+        end_sec: End of range (default -1 = to end of clip).
+        strength: For brighten/darken, 0.0-1.0 (default 0.5). Ignored by other ops.
+    """
+    if op not in _PIXEL_OPS:
+        return {"error": f"Unknown op '{op}'. Supported: {sorted(_PIXEL_OPS)}"}
+    text = _read(path)
+    parsed = parse_text_neutxt(text)
+    fps = parsed.header.fps or 8.0
+    start_idx = max(0, int(start_sec * fps))
+    end_idx = int(end_sec * fps) if end_sec >= 0 else 10**9
+
+    def frame_op(rgb, i):
+        if start_idx <= i < end_idx:
+            return _apply_pixel_op(rgb, op, strength)
+        return rgb
+
+    new_text = _reencode_video_and_audio(text, frame_op)
+    written = _write(output_path, new_text)
+    return {"output_path": written, "op": op,
+            "affected_range_sec": [start_sec, end_sec], "strength": strength}
+
+
+@mcp.tool()
+def neutxt_swap_hue(path: str, output_path: str,
+                     from_hue_deg: float, to_hue_deg: float,
+                     tolerance_deg: float = 30.0,
+                     start_sec: float = 0.0, end_sec: float = -1.0,
+                     saturation_min: int = 40) -> dict:
+    """Swap one hue range for another in video frames (e.g. green→red).
+
+    Hue angles in degrees on the color wheel:
+      red ≈ 0, yellow ≈ 60, green ≈ 120, cyan ≈ 180, blue ≈ 240, magenta ≈ 300.
+
+    Args:
+        path: Input .neutxt.txt path.
+        output_path: Where to write the result.
+        from_hue_deg: Center of hue range to replace (0-360).
+        to_hue_deg: Target hue (0-360).
+        tolerance_deg: ± range around from_hue_deg to match (default 30°).
+        start_sec: Start of affected range (default 0).
+        end_sec: End of range (default -1 = to end).
+        saturation_min: Minimum saturation (0-255) to consider a pixel "colored"
+                        rather than near-gray. Default 40.
+    """
+    text = _read(path)
+    parsed = parse_text_neutxt(text)
+    fps = parsed.header.fps or 8.0
+    start_idx = max(0, int(start_sec * fps))
+    end_idx = int(end_sec * fps) if end_sec >= 0 else 10**9
+
+    def frame_op(rgb, i):
+        if start_idx <= i < end_idx:
+            return _apply_hue_swap(rgb, from_hue_deg, to_hue_deg,
+                                    tolerance_deg, saturation_min)
+        return rgb
+
+    new_text = _reencode_video_and_audio(text, frame_op)
+    written = _write(output_path, new_text)
+    return {"output_path": written,
+            "from_hue_deg": from_hue_deg, "to_hue_deg": to_hue_deg,
+            "tolerance_deg": tolerance_deg}
+
+
+@mcp.tool()
+def neutxt_apply_audio_op(path: str, output_path: str, op: str,
+                           start_sec: float = 0.0, end_sec: float = -1.0,
+                           strength: float = 1.0) -> dict:
+    """Apply a DSP transform to the audio over a time range.
+
+    Args:
+        path: Input .neutxt.txt path.
+        output_path: Where to write the result.
+        op: One of volume, silence, reverse, fade_in, fade_out.
+        start_sec: Start of affected range (default 0).
+        end_sec: End of range (default -1 = to end).
+        strength: For volume, the multiplier (0.0-10.0, 1.0 = unchanged).
+                  Ignored by other ops.
+    """
+    import numpy as np
+    if op not in _AUDIO_OPS:
+        return {"error": f"Unknown op '{op}'. Supported: {sorted(_AUDIO_OPS)}"}
+
+    def audio_op(pcm, sr, header):
+        start = max(0, int(start_sec * sr))
+        end = min(len(pcm), int(end_sec * sr)) if end_sec >= 0 else len(pcm)
+        if end <= start:
+            return pcm
+        seg = pcm[start:end].copy()
+        if op == "volume":
+            seg = np.clip(seg * strength, -1.0, 1.0)
+        elif op == "silence":
+            seg = np.zeros_like(seg)
+        elif op == "reverse":
+            seg = seg[::-1].copy()
+        elif op == "fade_in":
+            seg = seg * np.linspace(0.0, 1.0, len(seg), dtype=np.float32)
+        elif op == "fade_out":
+            seg = seg * np.linspace(1.0, 0.0, len(seg), dtype=np.float32)
+        out = pcm.copy()
+        out[start:end] = seg
+        return out
+
+    text = _read(path)
+    new_text = _reencode_video_and_audio(text, lambda rgb, i: rgb, audio_op=audio_op)
+    written = _write(output_path, new_text)
+    return {"output_path": written, "op": op,
+            "affected_range_sec": [start_sec, end_sec], "strength": strength}
+
+
+@mcp.tool()
+def neutxt_replace_audio(path: str, output_path: str, audio_path: str,
+                          start_sec: float = 0.0, end_sec: float = -1.0) -> dict:
+    """Splice external audio into a NEUTXT file over a time range.
+
+    The new audio is loaded via ffmpeg, resampled to match the file's
+    audio_sr, and encoded with EnCodec at the file's existing bandwidth.
+
+    Args:
+        path: Input .neutxt.txt path.
+        output_path: Where to write the result.
+        audio_path: Source audio file (any ffmpeg-readable format).
+        start_sec: Where to splice in (default 0 = start).
+        end_sec: Where the splice ends in the output (default -1 = use full
+                 new-audio duration).
+    """
+    import numpy as np
+    from neutxt.audio_codec import load_audio_mono_pcm, decode_codes_to_audio
+
+    if not Path(audio_path).expanduser().exists():
+        return {"error": f"audio_path not found: {audio_path}"}
+
+    text = _read(path)
+    parsed = parse_text_neutxt(text)
+    h = parsed.header
+    sr = h.audio_sr or 24000
+
+    # Need existing audio PCM as the base
+    _, existing_chunks = decode_text_to_audio_codes(text)
+    enc = _get_encoder(sr, h.audio_bandwidth)
+
+    if existing_chunks:
+        merged = np.concatenate(existing_chunks, axis=1)
+        existing_pcm = decode_codes_to_audio(enc, merged)
+    else:
+        # If no existing audio, create a silent base matching the video duration
+        video_dur = (h.video_frames / h.fps) if h.fps > 0 else 0
+        existing_pcm = np.zeros(int(video_dur * sr), dtype=np.float32)
+
+    # Load the new audio
+    new_pcm = load_audio_mono_pcm(audio_path, sr).astype(np.float32)
+
+    start = max(0, int(start_sec * sr))
+    if end_sec < 0:
+        splice_len = len(new_pcm)
+    else:
+        splice_len = max(0, int((end_sec - start_sec) * sr))
+    splice_len = min(splice_len, len(new_pcm))
+
+    out_pcm = existing_pcm.copy()
+    # Pad base if splice goes past the end
+    needed = start + splice_len
+    if needed > len(out_pcm):
+        out_pcm = np.concatenate([out_pcm, np.zeros(needed - len(out_pcm),
+                                                     dtype=np.float32)])
+    out_pcm[start:start + splice_len] = new_pcm[:splice_len]
+
+    def audio_op(_pcm, _sr, _h):
+        return out_pcm
+
+    new_text = _reencode_video_and_audio(text, lambda rgb, i: rgb, audio_op=audio_op)
+    written = _write(output_path, new_text)
+    return {"output_path": written, "inserted_sec": splice_len / sr,
+            "at_sec": start_sec}
+
+
+# ---------------------------------------------------------------------------
+# Player / export
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def neutxt_to_mp4(path: str, output_path: str, open_after: bool = False) -> dict:
+    """Decode a NEUTXT file to a standard .mp4 (video + audio muxed).
+
+    Args:
+        path: Input .neutxt.txt path.
+        output_path: Where to write the .mp4.
+        open_after: If true, launch the system player on the result.
+    """
+    result = _decode_to_mp4(path, output_path)
+    if open_after:
+        import subprocess, sys
+        opener = {"darwin": "open", "linux": "xdg-open", "win32": "start"}.get(
+            sys.platform, "open")
+        try:
+            subprocess.Popen([opener, result["output_path"]])
+            result["opened"] = True
+        except Exception as e:
+            result["opened"] = False
+            result["open_error"] = str(e)
+    return result
+
+
+def _decode_to_mp4(path: str, output_path: str) -> dict:
+    """Decode NEUTXT video + audio, mux with ffmpeg into an .mp4 file."""
+    import subprocess, tempfile
+    import numpy as np
+    from PIL import Image as PILImage
+    from neutxt.vq import decode_packed_codes_to_frame
+    from neutxt.audio_codec import decode_codes_to_audio, pcm_to_wav_bytes
+
+    text = _read(path)
+    header, video_codes = decode_text_to_frames(text)
+    _, audio_chunks = decode_text_to_audio_codes(text)
+
+    if not video_codes and not audio_chunks:
+        return {"error": "No video or audio content to decode."}
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        video_input: list[str] = []
+        audio_input: list[str] = []
+
+        if video_codes:
+            tok = _get_tokenizer()
+            for i, codes in enumerate(video_codes):
+                frame = decode_packed_codes_to_frame(tok, codes, 16, 16)
+                PILImage.fromarray(frame, "RGB").save(tmp / f"f_{i:05d}.png")
+            video_input = ["-framerate", str(header.fps),
+                           "-i", str(tmp / "f_%05d.png")]
+
+        if audio_chunks:
+            enc = _get_encoder(header.audio_sr, header.audio_bandwidth)
+            merged = np.concatenate(audio_chunks, axis=1)
+            pcm = decode_codes_to_audio(enc, merged)
+            wav_bytes = pcm_to_wav_bytes(pcm, header.audio_sr)
+            wav_path = tmp / "audio.wav"
+            wav_path.write_bytes(wav_bytes)
+            audio_input = ["-i", str(wav_path)]
+
+        out = Path(output_path).expanduser().resolve()
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+        cmd.extend(video_input)
+        cmd.extend(audio_input)
+        if video_codes and audio_chunks:
+            cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-shortest"])
+        elif video_codes:
+            cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+        else:
+            cmd.extend(["-c:a", "aac"])
+        cmd.append(str(out))
+        subprocess.run(cmd, check=True, capture_output=True)
+
+    return {"output_path": str(out),
+            "video_frames": len(video_codes),
+            "audio_chunks": len(audio_chunks),
+            "duration_sec": round(max(
+                len(video_codes) / header.fps if video_codes and header.fps else 0,
+                len(audio_chunks) * (header.audio_chunk_seconds or 1)
+            ), 2)}
 
 
 # ---------------------------------------------------------------------------

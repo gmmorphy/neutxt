@@ -1,15 +1,70 @@
-"""Play .neutxt files with Tkinter video and sounddevice audio (cross-platform)."""
+"""Play .neutxt files.
+
+For NEUTXT text files (.neutxt.txt), decodes to a standard .mp4 with ffmpeg
+and opens it in the system player — simplest and most reliable path.
+
+For legacy binary .neutxt files, falls back to the Tkinter + sounddevice
+player below.
+"""
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import struct
+import sys
+import tempfile
 import threading
 import time
 import queue
 import zlib
+from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
+
+
+def _is_text_neutxt(path: str) -> bool:
+    """Return True if path looks like a NEUTXT v2 text file."""
+    p = Path(path)
+    if p.suffix == ".txt" or p.name.endswith(".neutxt.txt"):
+        return True
+    try:
+        with open(p, "rb") as f:
+            head = f.read(64)
+        return head.startswith(b"--- NEUTXT")
+    except OSError:
+        return False
+
+
+def _system_open(path: str):
+    opener = {"darwin": "open", "linux": "xdg-open", "win32": "start"}.get(
+        sys.platform, "open")
+    subprocess.Popen([opener, path])
+
+
+def _play_text_neutxt(input_path: str, keep: bool = False):
+    """Decode a NEUTXT text file to MP4 and launch the system player."""
+    from neutxt.mcp_server import _decode_to_mp4
+
+    if keep:
+        out = str(Path(input_path).with_suffix("").with_suffix(".mp4"))
+        result = _decode_to_mp4(input_path, out)
+        print(f"Saved: {result['output_path']}")
+    else:
+        td = tempfile.mkdtemp(prefix="neutxt_play_")
+        out = os.path.join(td, "preview.mp4")
+        result = _decode_to_mp4(input_path, out)
+        print(f"Decoded to: {result['output_path']}")
+
+    if "error" in result:
+        print(f"Error: {result['error']}")
+        return
+
+    print(f"  duration={result['duration_sec']}s, "
+          f"video={result['video_frames']} frames, "
+          f"audio={result['audio_chunks']} chunks")
+    _system_open(result["output_path"])
 
 try:
     import zstandard as zstd
@@ -25,8 +80,10 @@ except ImportError:
     sd = None
     _HAVE_SD = False
 
-from PIL import Image, ImageFilter, ImageTk
-import tkinter as tk
+# PIL + tkinter are only needed for the legacy binary-format player below.
+# We lazy-import them inside main() so systems without _tkinter can still
+# use the text-format path.
+Image = ImageFilter = ImageTk = tk = None
 
 from neutxt.codec import read_header, iter_video_records, decode_audio_records_to_wav_bytes
 from neutxt.vq import pick_device, load_magvit2, decode_packed_codes_to_frame
@@ -152,9 +209,11 @@ def _play_audio_sd(wav_bytes: bytes, sr: int):
 
 def main():
     ap = argparse.ArgumentParser(description="Play .neutxt files")
-    ap.add_argument("input", help=".neutxt file")
-    ap.add_argument("--vq_ckpt", required=True)
-    ap.add_argument("--vq_config", required=True, help="MAGVIT2 YAML config")
+    ap.add_argument("input", help=".neutxt file (text or binary)")
+    ap.add_argument("--vq_ckpt",
+                    help="MAGVIT2 checkpoint (required for legacy binary format)")
+    ap.add_argument("--vq_config",
+                    help="MAGVIT2 YAML config (required for legacy binary format)")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     ap.add_argument("--qsize", type=int, default=120)
     ap.add_argument("--scale", type=int, default=1, help="UI upscale factor")
@@ -162,7 +221,28 @@ def main():
     ap.add_argument("--sharpen_pct", type=int, default=80, help="unsharp mask percent")
     ap.add_argument("--noaudio", action="store_true")
     ap.add_argument("--novideo", action="store_true")
+    ap.add_argument("--keep", action="store_true",
+                    help="For text files: save the decoded .mp4 next to the input "
+                         "instead of using a temp file")
     args = ap.parse_args()
+
+    # Text-format path: decode to .mp4 and open in system player
+    if _is_text_neutxt(args.input):
+        # Pass MAGVIT2 paths via env so the shared decode helper can load them
+        if args.vq_ckpt and not os.environ.get("NEUTXT_VQ_CKPT"):
+            os.environ["NEUTXT_VQ_CKPT"] = args.vq_ckpt
+        if args.vq_config and not os.environ.get("NEUTXT_VQ_CONFIG"):
+            os.environ["NEUTXT_VQ_CONFIG"] = args.vq_config
+        _play_text_neutxt(args.input, keep=args.keep)
+        return
+
+    # Legacy binary format requires MAGVIT2 paths
+    if not (args.vq_ckpt and args.vq_config):
+        ap.error("--vq_ckpt and --vq_config are required for legacy binary .neutxt files")
+
+    global Image, ImageFilter, ImageTk, tk
+    from PIL import Image, ImageFilter, ImageTk  # noqa: F811
+    import tkinter as tk  # noqa: F811
 
     magic, meta = read_header(args.input)
     print("Magic:", magic)
